@@ -1,0 +1,86 @@
+name: AnyDesk-VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      segundos:
+        description: "Tempo que a VM fica ativa (segundos)"
+        default: "2000"
+
+jobs:
+  vm:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Criar usuário com senha aleatória
+        shell: pwsh
+        run: |
+          $up  = [char[]]'ABCDEFGHJKLMNPQRSTUVWXYZ'
+          $low = [char[]]'abcdefghijkmnopqrstuvwxyz'
+          $num = [char[]]'23456789'
+          $sp  = [char[]]'@#_-'
+          $all = $up + $low + $num + $sp
+          $p  = @()
+          $p += $up  | Get-Random -Count 3
+          $p += $low | Get-Random -Count 3
+          $p += $num | Get-Random -Count 3
+          $p += $sp  | Get-Random -Count 2
+          $p += $all | Get-Random -Count 5
+          $password = -join ($p | Sort-Object { Get-Random })
+
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "Skyro" -Password $secure -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "Skyro"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Skyro"
+          "VM_PASS=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Instalar AnyDesk
+        shell: pwsh
+        run: |
+          $exe = "$env:TEMP\AnyDesk.exe"
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile $exe
+          Start-Process $exe -ArgumentList '--install "C:\AnyDesk" --start-with-win --silent' -Wait
+          Start-Sleep -Seconds 10
+          Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+          Start-Process "C:\AnyDesk\AnyDesk.exe"
+          Start-Sleep -Seconds 10
+
+      - name: Definir senha e pegar ID
+        shell: pwsh
+        run: |
+          $ad = "C:\AnyDesk\AnyDesk.exe"
+
+          cmd /c "echo $env:VM_PASS| `"$ad`" --set-password _unattended_access"
+          Start-Sleep -Seconds 5
+
+          $id = $null
+          for ($i = 0; $i -lt 12; $i++) {
+              $out = (cmd /c "`"$ad`" --get-id | more") | Out-String
+              $out = $out.Trim()
+              if ($out -match '^\d{6,}$') { $id = $out; break }
+              Start-Sleep -Seconds 5
+          }
+
+          if (-not $id) { Write-Error "Nao foi possivel obter o ID do AnyDesk"; exit 1 }
+          "ANYDESK_ID=$id" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Manter VM ativa
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "========= ACESSO ANYDESK ========="
+          Write-Host "ID:       $env:ANYDESK_ID"
+          Write-Host "Senha:    $env:VM_PASS"
+          Write-Host "Usuario:  Skyro (Windows)"
+          Write-Host "=================================="
+          Write-Host ""
+
+          $total = [int]"${{ github.event.inputs.segundos }}"
+          $fim = (Get-Date).AddSeconds($total)
+          while ((Get-Date) -lt $fim) {
+              $resta = [int]($fim - (Get-Date)).TotalSeconds
+              Write-Host "[$(Get-Date -Format T)] VM ativa - restam ${resta}s | ID: $env:ANYDESK_ID"
+              Start-Sleep -Seconds 30
+          }
+          Write-Host "Tempo encerrado."
